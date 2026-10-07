@@ -1,14 +1,23 @@
 import csv
+import hashlib
+import smtplib
+from datetime import datetime, timezone, timedelta
 import io
 from collections import defaultdict
 from flask import Blueprint, Response, abort, current_app, jsonify, request, redirect, url_for
-from flask_jwt_extended import create_access_token, jwt_required
+from flask_jwt_extended import create_access_token, jwt_required, set_access_cookies, unset_jwt_cookies
 from flask_mail import Message
 from sqlalchemy import func
 from .auth import current_user, roles_required
 from .extensions import db, mail, oauth
 from .models import (Answer, Aspect, Attempt, Course, CourseQuestionnaire,
-                     CriticalAlert, Enrollment, FormAttempt, Item, User)
+                     CriticalAlert, Enrollment, FormAttempt, Item, User, now)
+
+def safe_csv(value):
+    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
+
 
 api = Blueprint("api", __name__, url_prefix="/api")
 
@@ -23,7 +32,7 @@ def error(message, status=400):
 
 def promote_configured_admin(user):
     """Keep existing accounts in sync with the configured administrator list."""
-    if user.email.lower() in current_app.config["ADMIN_EMAILS"] and user.role != "admin":
+    if user.is_verified and user.email.lower() in current_app.config["ADMIN_EMAILS"] and user.role != "admin":
         user.role = "admin"
         return True
     return False
@@ -88,26 +97,36 @@ def register():
         return error("Nombre, correo válido y contraseña de al menos 8 caracteres son obligatorios")
     if User.query.filter_by(email=email).first():
         return error("Ya existe una cuenta con ese correo", 409)
-    role = "admin" if email in current_app.config["ADMIN_EMAILS"] else "student"
-    user = User(email=email, name=data["name"].strip(), role=role,
-                is_verified=role == "admin" or not current_app.config.get("MAIL_USERNAME"))
+    if email not in current_app.config["REGISTRATION_EMAILS"] | current_app.config["ADMIN_EMAILS"]:
+        return error("Solicita al centro que autorice tu correo", 403)
+    if not all(current_app.config.get(key) for key in ("MAIL_SERVER", "MAIL_USERNAME", "MAIL_PASSWORD", "MAIL_DEFAULT_SENDER")):
+        return error("No está disponible el correo de verificación. Contacta con el centro", 503)
+    user = User(email=email, name=data["name"].strip(), role="student", is_verified=False)
     user.set_password(data["password"])
     token = user.issue_verification_token()
     db.session.add(user)
-    db.session.commit()
-    if current_app.config.get("MAIL_USERNAME"):
-        link = f'{current_app.config["FRONTEND_URL"]}/verificar/{token}'
+    db.session.flush()
+    link = f'{current_app.config["BACKEND_URL"]}/api/auth/verify/{token}'
+    try:
         mail.send(Message("Verifica tu cuenta", recipients=[email], body=f"Verifica tu cuenta: {link}"))
-    return jsonify({"message": "Cuenta creada. Revisa tu correo para verificarla.",
-                    "verification_required": not user.is_verified}), 201
+    except (smtplib.SMTPException, OSError):
+        db.session.rollback()
+        return error("No se ha podido enviar la verificación. Inténtalo más tarde", 503)
+    db.session.commit()
+    return jsonify({"message": "Cuenta creada. Revisa tu correo para verificarla.", "verification_required": True}), 201
 
 
 @api.get("/auth/verify/<token>")
 def verify(token):
-    user = User.query.filter_by(verification_token=token).first_or_404()
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    user = User.query.filter_by(verification_token=digest).first_or_404()
+    issued = user.verification_issued_at
+    if not user.is_active or not issued or issued.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc) - timedelta(hours=24):
+        return error("Enlace caducado o no válido", 400)
     user.is_verified, user.verification_token = True, None
+    promote_configured_admin(user)
     db.session.commit()
-    return {"message": "Correo verificado"}
+    return redirect(f'{current_app.config["FRONTEND_URL"]}/acceso?verified=1')
 
 
 @api.post("/auth/login")
@@ -120,7 +139,9 @@ def login():
         return error("La cuenta está inactiva o pendiente de verificación", 403)
     if promote_configured_admin(user):
         db.session.commit()
-    return {"access_token": create_access_token(identity=str(user.id)), "user": user.as_dict()}
+    response = jsonify(user=user.as_dict())
+    set_access_cookies(response, create_access_token(identity=str(user.id), additional_claims={"version": user.auth_version}))
+    return response
 
 
 @api.get("/auth/google")
@@ -134,19 +155,44 @@ def google_login():
 def google_callback():
     token = oauth.google.authorize_access_token()
     info = token.get("userinfo") or oauth.google.userinfo()
-    email = info["email"].lower()
+    email = (info.get("email") or "").lower()
+    subject = info.get("sub")
+    if not email or not subject or info.get("email_verified") is not True:
+        return error("Google no ha verificado la identidad", 403)
     user = User.query.filter_by(email=email).first()
+    linked = User.query.filter_by(google_subject=subject).first()
+    if (linked and linked != user) or (user and user.google_subject and user.google_subject != subject):
+        return error("La identidad no coincide con la cuenta", 403)
     if not user:
-        role = "admin" if email in current_app.config["ADMIN_EMAILS"] else "student"
-        user = User(email=email, name=info.get("name", email.split("@")[0]), role=role,
-                    is_verified=True)
+        if email not in current_app.config["REGISTRATION_EMAILS"] | current_app.config["ADMIN_EMAILS"]:
+            return error("Solicita al centro que autorice tu correo", 403)
+        user = User(email=email, name=info.get("name") or email, role="student", is_verified=True)
         db.session.add(user)
-    else:
-        user.is_verified = True
-        promote_configured_admin(user)
+        db.session.flush()
+    if not user.is_active:
+        return error("Cuenta desactivada", 403)
+    if not user.is_verified:
+        user.password_hash = None
+        user.auth_version += 1
+    user.is_verified = True
+    user.verification_token = None
+    user.google_subject = subject
+    promote_configured_admin(user)
     db.session.commit()
-    access = create_access_token(identity=str(user.id))
-    return redirect(f'{current_app.config["FRONTEND_URL"]}/acceso?token={access}')
+    response = redirect(f'{current_app.config["FRONTEND_URL"]}/acceso?google=1')
+    set_access_cookies(response, create_access_token(identity=str(user.id), additional_claims={"version": user.auth_version}))
+    return response
+
+
+@api.post("/auth/logout")
+@jwt_required()
+def logout():
+    user = current_user()
+    user.auth_version += 1
+    db.session.commit()
+    response = jsonify(message="Sesiones cerradas")
+    unset_jwt_cookies(response)
+    return response
 
 
 @api.get("/me")
@@ -189,10 +235,14 @@ def questionnaire(course_id):
 def submit_attempt(course_id):
     user, data = current_user(), payload()
     course = Course.query.get_or_404(course_id)
+    if not course.is_active: return error("Curso cerrado", 403)
     if not Enrollment.query.filter_by(student_id=user.id, course_id=course.id).first():
         abort(403)
     expected = {i.id: i for a in Aspect.query.filter_by(level=course.level) for i in a.items}
-    answers = {int(a["item_id"]): int(a["value"]) for a in data.get("answers", [])}
+    try:
+        answers = {int(a["item_id"]): int(a["value"]) for a in data.get("answers", [])}
+    except (ValueError, KeyError, TypeError):
+        return error("Respuestas no válidas")
     if set(answers) != set(expected) or any(v not in range(1, 5) for v in answers.values()):
         return error("Debes responder todos los ítems con valores entre 1 y 4")
     attempt = Attempt(student_id=user.id, course_id=course.id,
@@ -238,8 +288,8 @@ def export_course(course_id):
     writer.writerow(["alumno", "correo", "fecha", "aspecto", "media", "nivel"])
     for attempt in Attempt.query.filter_by(course_id=course.id):
         for result in attempt_dict(attempt)["results"]:
-            writer.writerow([attempt.student.name, attempt.student.email, attempt.created_at.isoformat(),
-                             result["aspect"], result["average"], result["level"]])
+            writer.writerow([safe_csv(value) for value in [attempt.student.name, attempt.student.email, attempt.created_at.isoformat(),
+                             result["aspect"], result["average"], result["level"]]])
     return Response(output.getvalue(), mimetype="text/csv",
                     headers={"Content-Disposition": f'attachment; filename="curso-{course.id}.csv"'})
 
@@ -318,23 +368,30 @@ def admin_user(user_id):
         user.is_active = False
     else:
         data = payload()
+        email_changed = False
         if "email" in data:
             email = data["email"].strip().lower()
             duplicate = User.query.filter(func.lower(User.email) == email, User.id != user.id).first()
             if "@" not in email: return error("Correo no válido")
             if duplicate: return error("Ya existe una cuenta con ese correo", 409)
+            if user.email != email:
+                email_changed = True
+                user.is_verified = False
+                user.google_subject = None
+                user.verification_token = None
             user.email = email
         if data.get("role") not in (None, "student", "tutor", "admin"):
             return error("Rol no válido")
         if user.id == actor.id and (data.get("role") not in (None, "admin") or data.get("is_active") is False):
             return error("No puedes retirar tus propios permisos de administración", 409)
         for key in ("name", "role", "is_active", "is_verified"):
-            if key in data: setattr(user, key, data[key])
+            if key in data and not (key == "is_verified" and email_changed): setattr(user, key, data[key])
         if data.get("is_verified") is True:
             user.verification_token = None
         if "password" in data:
             if len(data["password"]) < 8: return error("La contraseña debe tener al menos 8 caracteres")
             user.set_password(data["password"])
+    user.auth_version += 1
     db.session.commit(); return ("", 204) if request.method == "DELETE" else user.as_dict()
 
 

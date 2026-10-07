@@ -19,9 +19,9 @@ export class LoginComponent {
     password = '';
 
     constructor() {
-        const token = this.route.snapshot.queryParamMap.get('token');
-        if (token) {
-            localStorage.setItem('token', token);
+        if (this.route.snapshot.queryParamMap.get('verified')) this.message.set('Correo verificado. Ya puedes iniciar sesión.');
+        const google = this.route.snapshot.queryParamMap.get('google');
+        if (google) {
             this.api.loadMe().subscribe(() => this.router.navigate(['/panel']))
         }
     } submit() {

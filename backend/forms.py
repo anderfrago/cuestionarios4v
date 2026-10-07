@@ -11,11 +11,12 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
+from .privacy import require_sensitive_access, require_course_data_access, sensitive_enabled
 from .auth import current_user, roles_required
 from .extensions import db
 from .models import (Course, CourseQuestionnaire, CriticalAlert, Enrollment, FormAspect,
                      FormAttempt, FormResponse, Question, Questionnaire, Attempt,
-                     QuestionnaireVersion, QuestionOption, QuestionRow)
+                     QuestionnaireVersion, QuestionOption, QuestionRow, now)
 from .routes import attempt_dict as legacy_attempt_dict, delete_form_attempts
 
 forms = Blueprint("forms", __name__, url_prefix="/api")
@@ -35,6 +36,7 @@ def can_view_course(user, course):
 
 
 def form_attempt_dict(attempt, include_responses=False):
+    require_sensitive_access(attempt.version.questionnaire)
     values = {}
     for response in attempt.responses:
         if response.score is not None and response.question.is_scored:
@@ -65,6 +67,7 @@ def form_attempt_dict(attempt, include_responses=False):
 
 
 def copy_version(source, questionnaire):
+    questionnaire.requires_sensitive_approval = True
     version = QuestionnaireVersion(questionnaire_id=questionnaire.id,
         version=max([v.version for v in questionnaire.versions] or [0]) + 1, status="draft")
     db.session.add(version); db.session.flush()
@@ -133,7 +136,14 @@ def questionnaire_admin(questionnaire_id):
             return "", 204
         questionnaire.is_archived = True; db.session.commit(); return "", 204
     body = data()
-    for key in ("name", "description", "level", "is_archived"):
+    if "requires_sensitive_approval" in body:
+        if not isinstance(body["requires_sensitive_approval"], bool):
+            return fail("Clasificación no válida")
+        if not body["requires_sensitive_approval"] and any(
+            q.is_critical for v in questionnaire.versions for a in v.aspects for q in a.questions
+        ):
+            return fail("Los formularios con preguntas críticas requieren autorización específica")
+    for key in ("name", "description", "level", "is_archived", "requires_sensitive_approval"):
         if key in body: setattr(questionnaire, key, body[key])
     db.session.commit(); return questionnaire.as_dict(include_versions=True)
 
@@ -187,6 +197,7 @@ def publish_version(version_id):
 def draft_version(version_id):
     version = QuestionnaireVersion.query.get_or_404(version_id)
     if version.status != "draft": abort(409, description="Las versiones publicadas son inmutables")
+    version.questionnaire.requires_sensitive_approval = True
     return version
 
 
@@ -268,6 +279,7 @@ def assign_questionnaires(course_id):
     valid = {q.id for q in Questionnaire.query.filter(Questionnaire.id.in_(ids),
         Questionnaire.level == course.level, Questionnaire.is_archived.is_(False)).all()} if ids else set()
     if ids != valid: return fail("Algún formulario no existe o no corresponde al nivel del curso")
+    course.updated_at = now()
     CourseQuestionnaire.query.filter_by(course_id=course.id).delete()
     db.session.add_all([CourseQuestionnaire(course_id=course.id, questionnaire_id=i) for i in valid])
     db.session.commit(); return {"questionnaire_ids": sorted(valid)}
@@ -283,7 +295,8 @@ def course_forms(course_id):
     forms_data = []
     for assignment in assigned:
         q = assignment.questionnaire; version = q.published_version
-        if not version or q.is_archived: continue
+        if not version or q.is_archived or not course.is_active: continue
+        if q.requires_sensitive_approval and not sensitive_enabled(): continue
         count = FormAttempt.query.filter_by(student_id=user.id, course_id=course.id, version_id=version.id).count() if user.role == "student" else 0
         item = q.as_dict(); item.update({"version_id": version.id, "version": version.version, "attempt_count": count})
         forms_data.append(item)
@@ -297,6 +310,8 @@ def form_definition(course_id, version_id):
     if user.role == "student" and not Enrollment.query.filter_by(student_id=user.id, course_id=course.id).first(): abort(403)
     if user.role != "student" and not can_view_course(user, course): abort(403)
     version = QuestionnaireVersion.query.get_or_404(version_id)
+    require_sensitive_access(version.questionnaire)
+    if not course.is_active or version.questionnaire.is_archived: abort(403)
     assigned = CourseQuestionnaire.query.filter_by(course_id=course.id,
         questionnaire_id=version.questionnaire_id, is_active=True).first()
     if not assigned or version.status != "published": abort(403)
@@ -309,10 +324,30 @@ def submit_form(course_id, version_id):
     course, user = Course.query.get_or_404(course_id), current_user()
     if not Enrollment.query.filter_by(student_id=user.id, course_id=course.id).first(): abort(403)
     version = QuestionnaireVersion.query.get_or_404(version_id)
+    require_sensitive_access(version.questionnaire)
+    if not course.is_active or version.questionnaire.is_archived: abort(403)
     if version.status != "published" or not CourseQuestionnaire.query.filter_by(course_id=course.id,
             questionnaire_id=version.questionnaire_id, is_active=True).first(): abort(403)
-    submitted = data().get("responses", []); by_key = {(int(r["question_id"]), r.get("row_id")): r for r in submitted}
+    submitted = data().get("responses", [])
+    try:
+        by_key = {(int(r["question_id"]), r.get("row_id")): r for r in submitted}
+    except (KeyError, TypeError, ValueError):
+        return fail("Respuestas no válidas")
+    if len(by_key) != len(submitted): return fail("Respuestas duplicadas")
     questions = [q for a in version.aspects if not a.is_archived for q in a.questions if not q.is_archived]
+    valid_keys = {(q.id, row.id) for q in questions for row in q.rows if not row.is_archived}
+    valid_keys.update((q.id, None) for q in questions if not any(not row.is_archived for row in q.rows))
+    if set(by_key) - valid_keys: return fail("Preguntas o filas no válidas")
+    for raw in submitted:
+        q = db.session.get(Question, int(raw["question_id"]))
+        option_id = raw.get("option_id")
+        option = db.session.get(QuestionOption, option_id) if option_id else None
+        if option_id and (not option or option.question_id != q.id or option.is_archived):
+            return fail("Opción no válida")
+        if q.question_type != "text" and not option:
+            return fail("Selecciona una opción válida")
+        if q.question_type == "text" and option:
+            return fail("Respuesta de texto no válida")
     for question in questions:
         keys = [(question.id, row.id) for row in question.rows if not row.is_archived] or [(question.id, None)]
         if question.required and any(key not in by_key or not (by_key[key].get("option_id") or
@@ -346,6 +381,7 @@ def submit_form(course_id, version_id):
 def form_analytics(course_id):
     course, user = Course.query.get_or_404(course_id), current_user()
     if not can_view_course(user, course): abort(403)
+    require_course_data_access(course)
     attempts = FormAttempt.query.filter_by(course_id=course.id).order_by(FormAttempt.created_at).all()
     detail = [form_attempt_dict(a, True) for a in attempts]
     legacy = Attempt.query.filter_by(course_id=course.id).order_by(Attempt.created_at).all()
@@ -366,11 +402,13 @@ def form_analytics(course_id):
 def review_alert(alert_id):
     alert, user = CriticalAlert.query.get_or_404(alert_id), current_user()
     if not can_view_course(user, alert.attempt.course): abort(403)
+    require_sensitive_access(alert.attempt.version.questionnaire)
     alert.reviewed_at = datetime.now(timezone.utc); alert.reviewed_by_id = user.id
     alert.review_notes = data().get("notes", ""); db.session.commit(); return alert.as_dict()
 
 
 def export_attempts(course):
+    require_course_data_access(course)
     return FormAttempt.query.filter_by(course_id=course.id).order_by(FormAttempt.created_at).all()
 
 
@@ -402,7 +440,9 @@ def export_xlsx(course_id):
     widths = [24,10,22,30,19,24,55,34,45,12]
     for index, width in enumerate(widths, 1): ws.column_dimensions[chr(64+index)].width = width
     for row in ws.iter_rows():
-        for cell in row: cell.alignment = Alignment(vertical="top", wrap_text=True)
+        for cell in row:
+            if isinstance(cell.value, str): cell.data_type = "s"
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
     out = BytesIO(); wb.save(out); out.seek(0)
     return send_file(out, as_attachment=True, download_name=f"{course.name}-respuestas.xlsx",
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -471,5 +511,6 @@ def export_pdf(course_id):
 def export_attempt_pdf(attempt_id):
     attempt, user = FormAttempt.query.get_or_404(attempt_id), current_user()
     if not can_view_course(user, attempt.course): abort(403)
+    require_sensitive_access(attempt.version.questionnaire)
     out = pdf_document(attempt.course, [attempt], "Ficha individual del cuestionario")
     return send_file(out, as_attachment=True, download_name=f"intento-{attempt.id}.pdf", mimetype="application/pdf")

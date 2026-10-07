@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from secrets import token_urlsafe
+import hashlib
 from werkzeug.security import check_password_hash, generate_password_hash
 from .extensions import db
 
@@ -16,6 +17,9 @@ class User(db.Model):
     role = db.Column(db.String(20), nullable=False, default="student")
     is_verified = db.Column(db.Boolean, default=False, nullable=False)
     is_active = db.Column(db.Boolean, default=True, nullable=False)
+    auth_version = db.Column(db.Integer, nullable=False, default=1)
+    google_subject = db.Column(db.String(255), unique=True)
+    verification_issued_at = db.Column(db.DateTime(timezone=True))
     verification_token = db.Column(db.String(100), unique=True)
     created_at = db.Column(db.DateTime(timezone=True), default=now)
 
@@ -26,8 +30,10 @@ class User(db.Model):
         return bool(self.password_hash and check_password_hash(self.password_hash, password))
 
     def issue_verification_token(self):
-        self.verification_token = token_urlsafe(32)
-        return self.verification_token
+        token = token_urlsafe(32)
+        self.verification_token = hashlib.sha256(token.encode()).hexdigest()
+        self.verification_issued_at = now()
+        return token
 
     def as_dict(self):
         return {"id": self.id, "email": self.email, "name": self.name,
@@ -35,6 +41,7 @@ class User(db.Model):
 
 
 class Course(db.Model):
+    updated_at = db.Column(db.DateTime(timezone=True), nullable=False, default=now, onupdate=now)
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(120), nullable=False)
     academic_year = db.Column(db.String(9), nullable=False)
@@ -121,6 +128,7 @@ class Answer(db.Model):
 
 
 class Questionnaire(db.Model):
+    requires_sensitive_approval = db.Column(db.Boolean, nullable=False, default=True)
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(180), nullable=False)
     description = db.Column(db.Text, default="")
@@ -137,6 +145,7 @@ class Questionnaire(db.Model):
     def as_dict(self, include_versions=False):
         data = {"id": self.id, "name": self.name, "description": self.description,
                 "level": self.level, "is_archived": self.is_archived,
+                "requires_sensitive_approval": self.requires_sensitive_approval,
                 "published_version_id": self.published_version.id if self.published_version else None}
         if include_versions:
             data["versions"] = [v.as_dict() for v in self.versions]
@@ -300,3 +309,10 @@ class CriticalAlert(db.Model):
                 "course": self.attempt.course.as_dict(), "question": self.response.question.title,
                 "answer": self.response.option.label if self.response.option else self.response.text_value,
                 "attempt_id": self.attempt_id}
+
+
+class AuthAttempt(db.Model):
+    __tablename__ = "auth_attempts"
+    key = db.Column(db.String(64), primary_key=True)
+    hits = db.Column(db.Integer, nullable=False)
+    expires_at = db.Column(db.Integer, nullable=False, index=True)

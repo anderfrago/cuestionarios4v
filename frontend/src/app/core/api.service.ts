@@ -3,6 +3,7 @@ import { HttpClient } from '@angular/common/http';
 import { Injectable, computed, inject, signal } from '@angular/core';
 
 import { tap } from 'rxjs';
+import { Router } from '@angular/router';
 
 import { Aspect, Attempt, Course, CriticalAlert, FormAspect, FormQuestion, FormResponseInput, FormVersion, Questionnaire, User } from './models';
 
@@ -11,7 +12,15 @@ import { Aspect, Attempt, Course, CriticalAlert, FormAspect, FormQuestion, FormR
 export class ApiService {
   private http = inject(HttpClient);
 
-  readonly user = signal<User | null>(JSON.parse(localStorage.getItem('user') || 'null'));
+  readonly user = signal<User | null>(null);
+
+  readonly sessionError = signal('');
+  private router = inject(Router);
+
+  constructor() {
+    localStorage.removeItem('token');
+    localStorage.removeItem('user');
+  }
 
   readonly courses = signal<Course[]>([]);
 
@@ -24,11 +33,8 @@ export class ApiService {
 
   login(email: string, password: string) {
     return this.http.post<{
-      access_token: string;
       user: User
     }>('/api/auth/login', { email, password }).pipe(tap(r => {
-      localStorage.setItem('token', r.access_token);
-      localStorage.setItem('user', JSON.stringify(r.user));
       this.user.set(r.user)
     }));
   }
@@ -40,16 +46,18 @@ export class ApiService {
     return this.http.post('/api/auth/register', data);
   }
   logout() {
-    localStorage.clear();
-    this.user.set(null);
-    this.courses.set([]);
+    this.sessionError.set('');
+    const clear = () => {this.user.set(null); this.courses.set([]); this.attempts.set([]); this.router.navigateByUrl('/acceso');};
+    this.http.post('/api/auth/logout', {}).subscribe({
+      next: clear,
+      error: error => error.status === 401 ? clear() : this.sessionError.set('No se ha podido cerrar la sesión. Comprueba la conexión e inténtalo de nuevo.')
+    });
   }
   loadMe() {
     return this.http.get<{
       user: User;
       courses: Course[]
     }>('/api/me').pipe(tap(r => {
-      localStorage.setItem('user', JSON.stringify(r.user));
       this.user.set(r.user);
       this.courses.set(r.courses)
     }));

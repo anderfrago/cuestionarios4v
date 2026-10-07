@@ -123,6 +123,10 @@ export class AdminComponent implements OnInit {
     addForm() {
         this.api.createQuestionnaire(this.newForm).subscribe(f => { this.newForm = { name: '', description: '', level: 1 }; this.reload(); this.selectForm(f) })
     }
+    saveClassification(f: Questionnaire) {
+        if (!confirm('Confirma que esta clasificación ha sido revisada por el centro. Los formularios con datos de salud deben mantener activada la autorización específica.')) return;
+        this.api.updateQuestionnaire(f.id, {requires_sensitive_approval: f.requires_sensitive_approval}).subscribe({next: () => this.message.set('Clasificación guardada.'), error: e => this.message.set(e.error?.error || 'No se pudo guardar')});
+    }
     selectForm(f: Questionnaire) {
         this.selectedForm.set(f);
         this.version.set(f.versions?.find(v => v.status === 'draft') || f.versions?.at(-1) || null)

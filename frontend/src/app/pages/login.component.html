@@ -12,6 +12,7 @@
                         (click)="mode.set('register')">Crear cuenta</button></div>
                 <a class="btn btn-outline-dark w-100 mb-3" href="/api/auth/google">Continuar con Google</a>
                 <div class="text-center small text-secondary mb-3">o usa tu correo</div>
+                <p>El centro debe autorizar tu correo antes del registro. Consulta la <a href="/privacidad">información de privacidad</a>.</p>
                 <form (ngSubmit)="submit()">@if(mode()==='register'){<label class="form-label">Nombre</label><input
                         class="form-control mb-3" name="name" [(ngModel)]="name" required>}
                     <label class="form-label">Correo electrónico</label><input class="form-control mb-3" name="email"
@@ -22,8 +23,6 @@
                         {{message()}}</div>}<button class="btn btn-primary w-100"
                         [disabled]="busy()">{{busy()?'Procesando…':mode()==='login'?'Entrar':'Registrarme'}}</button>
                 </form>
-                <p class="small text-secondary mt-3 mb-0">Al continuar aceptas la <a
-                        href="https://cuatrovientos.org/rgpd/" target="_blank">política de privacidad</a>.</p>
             </div>
         </div>
     </div>

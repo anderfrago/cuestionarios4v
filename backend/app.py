@@ -1,7 +1,7 @@
 from pathlib import Path
 from flask import Flask, jsonify, send_from_directory
 from dotenv import load_dotenv
-from .config import Config
+from .config import config_values
 from .extensions import cors, db, jwt, mail, migrate, oauth
 from .routes import api
 from .forms import forms
@@ -20,17 +20,25 @@ def create_app(config=None):
     )
 
     app = Flask(__name__, static_folder=None)
-    app.config.from_object(Config)
+    app.config.update(config_values())
     if config: app.config.update(config)
+    for key in ("SECRET_KEY", "JWT_SECRET_KEY"):
+        value = app.config.get(key, "")
+        if len(value) < 32 or any(word in value.lower() for word in ("cambia", "dev-change", "desarrollo")):
+            raise RuntimeError(f"Configura {key} con una clave aleatoria de al menos 32 caracteres")
     db.init_app(app); migrate.init_app(app, db); jwt.init_app(app); mail.init_app(app); oauth.init_app(app)
     if app.config.get("GOOGLE_CLIENT_ID"):
         oauth.register(name="google", client_id=app.config["GOOGLE_CLIENT_ID"],
                        client_secret=app.config["GOOGLE_CLIENT_SECRET"],
                        server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
                        client_kwargs={"scope": "openid email profile"})
-    cors.init_app(app, resources={r"/api/*": {"origins": app.config["FRONTEND_URL"]}})
+    cors.init_app(app, resources={r"/api/*": {"origins": app.config["FRONTEND_URL"]}}, supports_credentials=True)
     app.register_blueprint(api)
     app.register_blueprint(forms)
+    from .security import register_security
+    from .retention import register_retention
+    register_security(app)
+    register_retention(app)
 
     @app.errorhandler(404)
     def not_found(_): return jsonify(error="Recurso no encontrado"), 404
@@ -69,6 +77,3 @@ def create_app(config=None):
             db.create_all()
             seed_questionnaires()
     return app
-
-
-app = create_app()

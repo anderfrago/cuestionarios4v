@@ -142,6 +142,8 @@
                     <div><span class="badge text-bg-light">{{f.level}}º</span>
                         <h2 class="h4 mt-2">{{f.name}}</h2>
                         <p class="text-secondary">{{f.description}}</p>
+                        <label><input type="checkbox" [(ngModel)]="f.requires_sensitive_approval"> Requiere autorización específica por datos sensibles o revisión pendiente</label>
+                        <button class="btn btn-sm btn-outline-primary" (click)="saveClassification(f)">Guardar clasificación</button>
                     </div><button class="btn btn-outline-danger btn-sm align-self-start"
                         (click)="archiveForm(f)">Eliminar</button>
                 </div>

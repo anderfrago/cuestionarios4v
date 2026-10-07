@@ -9,11 +9,12 @@
                     class="btn btn-primary btn-sm" (click)="logout()">Salir</button></div>}</div>
     </nav>
 </header>
+@if(api.sessionError()){<p role="alert" class="container alert alert-warning">{{api.sessionError()}}</p>}
 <main class="app-content"><router-outlet /></main>
 <footer class="site-footer mt-5">
     <div class="container d-flex flex-column flex-md-row justify-content-between align-items-md-center gap-2">
         <div>© 2026 Ander Frago</div>
-        <div>Centro Integrado Cuatrovientos · <a href="https://cuatrovientos.org/rgpd/" target="_blank"
+        <div>Centro Integrado Cuatrovientos · <a href="/privacidad" target="_blank"
                 rel="noopener">Privacidad y RGPD</a></div>
     </div>
 </footer>

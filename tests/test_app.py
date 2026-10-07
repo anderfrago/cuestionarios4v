@@ -1,4 +1,6 @@
 import pytest
+from unittest.mock import patch
+from http.cookies import SimpleCookie
 from backend import create_app
 from backend.extensions import db
 from backend.models import Attempt, Course, Enrollment, FormAttempt, Questionnaire, User
@@ -7,25 +9,38 @@ from backend.models import Attempt, Course, Enrollment, FormAttempt, Questionnai
 @pytest.fixture()
 def app():
     app = create_app({"TESTING": True, "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:",
-                      "ADMIN_EMAILS": {"admin@example.com"}, "MAIL_USERNAME": None,
+                      "ADMIN_EMAILS": {"admin@example.com"}, "REGISTRATION_EMAILS": {"student@example.com"},
+                      "MAIL_SERVER": "smtp.example.org", "MAIL_USERNAME": "test", "MAIL_PASSWORD": "test", "MAIL_DEFAULT_SENDER": "test@example.org",
+                      "SENSITIVE_DATA_ENABLED": True, "SENSITIVE_REVIEWER_EMAILS": {"admin@example.com", "tutor@example.com"}, "SECRET_KEY": "s" * 48,
+                      "JWT_COOKIE_SECURE": False, "SESSION_COOKIE_SECURE": False,
                       "JWT_SECRET_KEY": "test-key-that-is-longer-than-thirty-two-bytes",
                       "AUTO_CREATE_DB": True})
     yield app
 
 
 @pytest.fixture()
-def client(app): return app.test_client()
+def client(app): return app.test_client(use_cookies=False)
 
 
 def register(client, email, name="Persona"):
-    return client.post("/api/auth/register", json={"email": email, "name": name, "password": "Segura123!"})
+    with patch("backend.routes.mail.send") as send:
+        response = client.post("/api/auth/register", json={"email": email, "name": name, "password": "Segura123!"}, headers={"X-Requested-With": "XMLHttpRequest"})
+    if response.status_code == 201:
+        token = send.call_args.args[0].body.split("/api/auth/verify/")[1]
+        assert client.get(f"/api/auth/verify/{token}").status_code == 302
+    return response
 
 
 def login(client, email):
-    return client.post("/api/auth/login", json={"email": email, "password": "Segura123!"}).get_json()["access_token"]
+    response = client.post("/api/auth/login", json={"email": email, "password": "Segura123!"}, headers={"X-Requested-With": "XMLHttpRequest"})
+    assert response.status_code == 200, response.get_json()
+    cookies = SimpleCookie()
+    for header in response.headers.getlist("Set-Cookie"): cookies.load(header)
+    return {"Cookie": "; ".join(f"{key}={value.value}" for key, value in cookies.items()),
+            "X-CSRF-TOKEN": cookies["csrf_access_token"].value, "X-Requested-With": "XMLHttpRequest"}
 
 
-def auth(token): return {"Authorization": f"Bearer {token}"}
+def auth(token): return token
 
 
 def test_registration_login_and_admin_role(client):

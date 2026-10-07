@@ -15,7 +15,7 @@ export class DashboardComponent implements OnInit {
     ngOnInit() {
         this.api.loadMe().subscribe();
         if (this.api.role() === 'student')
-            this.api.loadAttempts().subscribe()
+            this.api.loadAttempts().subscribe({error: e => {this.api.attempts.set([]); if(e.status !== 403) this.msg.set('No se ha podido cargar el historial.');}})
     } join() {
         this.api.join(this.code).subscribe({
             next: () => {
