@@ -4,6 +4,44 @@ Aplicación Flask + Angular 21 para gestionar los distintos cuestionarios del ce
 
 Consulta primero la [guía de privacidad y actualización](docs/PRIVACIDAD_Y_ACTUALIZACION.md), con diagrama, migración y requisitos pendientes. Los formularios sensibles o sin revisar están bloqueados por defecto.
 
+## Adecuación al RGPD
+
+Documentación revisada el 9 de octubre de 2026 a partir de los diagramas del informe inicial y del código actual. Describe las medidas implementadas; la configuración y autorización de producción deben comprobarse aparte.
+
+La aplicación incorpora altas autorizadas y verificadas, sesiones protegidas y revocables, permisos por curso y bloqueo por defecto de formularios sensibles o pendientes de revisión. Los datos sensibles requieren autorización específica y acceso de personas designadas, además del permiso sobre el curso. Deben valorarse con el DPD las bases jurídicas y la necesidad de una evaluación de impacto. El borrado configurable exige vista previa y ejecución expresa; excluye cursos con alertas sin revisar y conserva cuentas y plantillas.
+
+Estos controles apoyan la adecuación al RGPD, pero no acreditan por sí solos el cumplimiento ni sustituyen la autorización del centro. Antes del uso con datos reales deben verificarse en el despliegue, completar la información de privacidad, revisar proveedores y condiciones de tratamiento y aprobar la conservación y el borrado, incluidas copias y exportaciones.
+
+La página `/privacidad` muestra `PRIVACY_CONTROLLER`, `PRIVACY_CONTACT`, `PRIVACY_LEGAL_BASIS`, `PRIVACY_RETENTION` y `PRIVACY_PROVIDERS`, configuradas en el `.env` de cada despliegue (`backend/.env` en Generador de equipos). `PRIVACY_RETENTION` es texto informativo y no activa el borrado. Consulta los plazos y comandos operativos en la guía específica.
+
+[Guía de privacidad](docs/PRIVACIDAD_Y_ACTUALIZACION.md) · [Web](https://cuestionarios4v.eu.pythonanywhere.com/acceso).
+
+El enlace utiliza el nuevo dominio europeo. La migración está en curso según la información disponible; debe confirmarse su finalización, la versión desplegada y el tratamiento de las copias del alojamiento anterior. Alojar en Europa no determina dónde procesan los datos otros proveedores.
+
+## Flujo de funcionamiento y datos
+
+```mermaid
+flowchart TD
+    U["Cuenta autorizada: Google o correo verificado"] --> S["Sesión protegida y permisos por rol y curso"]
+    S --> Q{"Formulario revisado y habilitado"}
+    Q -->|"No"| N["Recogida bloqueada"]
+    Q -->|"Ordinario"| A["Alumnado: respuestas validadas"]
+    Q -->|"Sensible"| H{"Autorización específica y configuración habilitada"}
+    H -->|"No"| N
+    H -->|"Sí"| A
+    A --> B["SQLite: respuestas, versiones y resultados"]
+    B --> R["Reglas y alertas: revisión humana"]
+    B --> T["Consulta y exportación según rol y curso"]
+    T --> D["Datos sensibles: solo personas expresamente designadas"]
+    B --> F["Curso inactivo fuera de plazo y sin alertas pendientes"]
+    R --> F
+    F --> V["Vista previa, selección y ejecución expresa"]
+    V --> X["Borrado de datos del curso; cuentas y plantillas conservadas"]
+```
+
+Los pasos de conservación representan una operación de mantenimiento que debe configurarse y ejecutarse; no un borrado automático por el mero transcurso del plazo.
+
+
 ## Desarrollo local
 
 ```bash
